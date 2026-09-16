@@ -1,0 +1,179 @@
+"""Russian storefront and order workflow. All state changes are transactional."""
+import hashlib
+import html
+import json
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+
+from telegram_api import ApiError
+
+STATUS = {
+    "requested": "Проверяем наличие", "quoted": "Ожидает оплаты",
+    "checkout": "Ожидаем подтверждение Telegram", "paid": "Оплачен, готовим выдачу",
+    "delivery_queued": "Отправляем подписку", "delivery_sending": "Отправляем подписку", "delivered": "Выдан",
+    "refund_pending": "Возврат в обработке", "refunded": "Возвращён",
+    "rejected": "Недоступен", "cancelled": "Отменён",
+}
+
+
+class UserError(Exception):
+    pass
+
+
+def esc(value):
+    return html.escape(str(value))
+
+
+def button(text, action):
+    return {"text": text, "callback_data": action}
+
+
+def load_catalog(path):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    products = data["products"]
+    if not products or len({p["id"] for p in products}) != len(products):
+        raise ValueError("Каталог пуст или содержит одинаковые id")
+    for p in products:
+        if not re.fullmatch(r"[a-z0-9_]{1,24}", p["id"]):
+            raise ValueError("Некорректный id товара")
+        if not 1 <= len(p["title"]) <= 80 or not 1 <= len(p["description"]) <= 500:
+            raise ValueError("Некорректное название или описание товара")
+    return {p["id"]: p for p in products if p.get("enabled", True)}
+
+
+from storefront import Storefront
+from operator_ui import OperatorUI
+
+
+class Shop(Storefront, OperatorUI):
+    def __init__(self, config, store, api, catalog, terms, clock=time.time):
+        self.cfg, self.s, self.api, self.catalog = config, store, api, catalog
+        self.terms = terms.strip()
+        self.terms_hash = hashlib.sha256((config.seller + self.terms).encode()).hexdigest()
+        self.clock = clock
+        self.prefix, self.counter = "", 0
+
+    def now(self):
+        return int(self.clock())
+
+    def say(self, uid, text, rows=None, key=None, kind="message", ref=None):
+        self.counter += 1
+        params = {"chat_id": uid, "text": text, "parse_mode": "HTML",
+                  "link_preview_options": {"is_disabled": True}}
+        if rows:
+            params["reply_markup"] = {"inline_keyboard": rows}
+        if kind in ("delivery", "secure"):
+            params["protect_content"] = True
+        self.s.job(key or f"update:{self.prefix}:{self.counter}", "sendMessage", params, kind, ref)
+
+    def screen(self, uid, text, rows=None):
+        target = getattr(self, "edit_target", None)
+        if not target or target[0] != uid:
+            self.say(uid, text, rows)
+            return
+        self.counter += 1
+        params = {"chat_id": uid, "message_id": target[1], "text": text,
+                  "parse_mode": "HTML", "link_preview_options": {"is_disabled": True},
+                  "reply_markup": {"inline_keyboard": rows or []}}
+        self.s.job(f"update:{self.prefix}:{self.counter}", "editMessageText", params, "screen")
+
+    def reset_flows(self, uid):
+        self.clear_selection(uid)
+        self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+        self.s.run("DELETE FROM operator_drafts WHERE user_id=?", (uid,))
+
+    def admin(self, uid):
+        if uid != self.cfg.owner_id:
+            raise UserError("Эта команда доступна администратору.")
+
+    def own_order(self, uid, oid):
+        order = self.s.order(oid)
+        if not order or (order["user_id"] != uid and uid != self.cfg.owner_id):
+            raise UserError("Заказ не найден.")
+        return order
+
+    def handle(self, update):
+        self.prefix, self.counter = str(update["update_id"]), 0
+        self.edit_target = None
+        if "pre_checkout_query" in update:
+            self.precheckout(update["pre_checkout_query"])
+            return
+        callback = update.get("callback_query")
+        message = update.get("message")
+        with self.s.db:
+            if self.s.one("SELECT 1 FROM handled WHERE id=?", (update["update_id"],)):
+                return
+            uid = None
+            try:
+                if callback:
+                    uid = callback["from"]["id"]
+                    chat = callback.get("message", {}).get("chat", {})
+                    if chat.get("type") == "private" and chat.get("id") == uid:
+                        mid = callback.get("message", {}).get("message_id")
+                        if isinstance(mid, int):
+                            self.edit_target = (uid, mid)
+                        self.callback(uid, callback.get("data", ""))
+                elif message and message.get("chat", {}).get("type") == "private":
+                    uid = message["chat"]["id"]
+                    if "successful_payment" in message:
+                        self.record_payment(uid, message["successful_payment"])
+                    elif "refunded_payment" in message:
+                        self.record_refund(uid, message["refunded_payment"])
+                    elif message.get("from", {}).get("id") == uid:
+                        self.message(uid, message.get("text", ""))
+            except UserError as exc:
+                if uid:
+                    self.say(uid, esc(exc))
+            self.s.run("INSERT INTO handled VALUES (?,?)", (update["update_id"], self.now()))
+        if callback:
+            try:
+                self.api.call("answerCallbackQuery", callback_query_id=callback["id"])
+            except Exception as exc:
+                from telegram_api import TransportError
+                if not isinstance(exc, (ApiError, TransportError)):
+                    raise
+
+    def menu(self, uid):
+        self.reset_flows(uid)
+        self.clear_selection(uid)
+        self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+        self.screen(uid, f"<b>{esc(self.cfg.title)}</b>\n\n"
+                 "Подписки для работы, творчества и отдыха.\n"
+                 "Выбери сервис — проверим доступность для твоей страны и предложим цену.\n\n"
+                 "Оплата только после подтверждения тарифа и способа выдачи.", [
+                     [button("🛍 Выбрать подписку", "catalog")],
+                     [button("🔎 Поиск", "search"), button("♡ Избранное", "favorites")],
+                     [button("Как купить", "how"), button("Частые вопросы", "faq")],
+                     [button("📦 Мои заказы", "orders"), button("💬 Поддержка", "support")],
+                 ])
+
+    def categories(self, uid):
+        self.reset_flows(uid)
+        self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+        self.clear_selection(uid)
+        categories = list(dict.fromkeys(p["category"] for p in self.catalog.values()))
+        rows = [[button(name, f"cat:{i}")] for i, name in enumerate(categories)]
+        rows.append([button("🔎 Найти по названию", "search"), button("♡ Избранное", "favorites")])
+        rows.append([button("Главное меню", "home")])
+        self.screen(uid, "<b>Каталог подписок</b>\nВыбери категорию.", rows)
+
+    def product(self, uid, pid):
+        self.reset_flows(uid)
+        p = self.catalog.get(pid)
+        if not p:
+            raise UserError("Этот сервис сейчас недоступен в каталоге.")
+        self.screen(uid, f"<b>{esc(p['title'])}</b>\n\n{esc(p['description'])}\n\n"
+                 "Тариф, срок, страна аккаунта и способ подключения согласуются до оплаты. "
+                 "Наличие пока не подтверждено.", [
+                     [button("Подобрать подписку →", f"wizard:{pid}")],
+                     [button("♥ Убрать из избранного" if self.is_favorite(uid, pid) else "♡ В избранное", f"favorite:{pid}")],
+                     [button("В каталог", "catalog")],
+                 ])
+
+    def callback(self, uid, data):
+        if self.operator_callback(uid, data):
+            return
+        if self.storefront_callback(uid, data):
+            return
