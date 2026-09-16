@@ -1,0 +1,210 @@
+            self.screen(uid, "<b>Здесь будут твои покупки</b>\nПосле заявки здесь появятся предложение, статус и инструкция по подключению.", [[button("Выбрать подписку", "catalog")]])
+            return
+        rows = [[button(f"{o['title']} · {STATUS[o['status']]}", f"order:{o['id']}")] for o in orders[:8]]
+        nav = []
+        if page: nav.append(button("← Новее", f"orders_page:{page-1}"))
+        if len(orders) > 8: nav.append(button("Раньше →", f"orders_page:{page+1}"))
+        if nav: rows.append(nav)
+        rows.append([button("Выбрать ещё подписку", "catalog"), button("Главное меню", "home")])
+        self.screen(uid, f"<b>Мои заказы</b>\nНажми на заказ, чтобы увидеть следующий шаг.\nСтраница {page+1}", rows)
+
+    def show_order(self, uid, oid):
+        o = self.own_order(uid, oid)
+        price = f"{o['price']} ⭐" if o["price"] else "Уточняется"
+        body = (f"<b>Заказ {oid}</b>\n{esc(o['title'])}\n"
+                f"Статус: {STATUS[o['status']]}\nЦена: {price}\n\n"
+                f"Запрос: {esc(o['details'])}")
+        if o["offer"]:
+            body += f"\n\nПредложение: {esc(o['offer'])}"
+        if o["status"] == "delivered" and o["delivery"]:
+            body += f"\n\n<b>Выдача</b>\n{esc(o['delivery'])}"
+        body += "\n\n" + self.order_next_step(o)
+        rows = [[button("Обновить статус", f"order:{oid}"), button("Все заказы", "orders")],
+                [button("Помощь с заказом", f"helporder:{oid}")]]
+        if o["status"] in ("requested", "quoted") and uid == o["user_id"]:
+            rows.append([button("Отменить заказ", f"cancelorder:{oid}")])
+        if o["status"] in ("delivered", "cancelled", "rejected", "refunded"):
+            rows.insert(0, [button("Заказать снова", f"wizard:{o['product_id']}")])
+        if o["status"] == "quoted" and o["expires"] >= self.now():
+            rows.insert(0, [button(f"Перейти к оплате · {o['price']} ⭐", f"review:{oid}")])
+        if uid == self.cfg.owner_id:
+            rows = self.operator_order_buttons(o) + [[button("← Управление", "op:dashboard")]]
+        if o["status"] == "delivered" and o["delivery"]:
+            self.say(uid, body, rows, kind="secure")
+        else:
+            self.screen(uid, body, rows)
+
+    def accept(self, uid, oid):
+        o = self.own_order(uid, oid)
+        if uid != o["user_id"]:
+            raise UserError("Оплатить предложение может только покупатель этого заказа.")
+        if not self.cfg.payments_enabled:
+            raise UserError("Приём оплаты пока не включён. Заявка сохранена.")
+        if o["status"] not in ("quoted", "checkout") or o["expires"] < self.now():
+            raise UserError("Это предложение уже закрыто или срок оплаты истёк. Напиши в поддержку.")
+        self.s.run("UPDATE orders SET accepted_terms=? WHERE id=?", (self.terms_hash, oid))
+        self.s.job(f"invoice:{oid}", "sendInvoice", {
+            "chat_id": uid, "title": o["title"][:32],
+            "description": f"Заказ {oid}. {o['offer']}\nРазовая оплата. Без автосписаний."[:255],
+            "payload": f"order:{oid}", "currency": "XTR", "provider_token": "",
+            "prices": [{"label": "Заказ", "amount": o["price"]}],
+            "start_parameter": f"order_{oid}", "protect_content": True,
+        }, "invoice", oid)
+        self.say(uid, "Счёт будет отправлен отдельным сообщением. Проверь предложение перед оплатой. "
+                 "Если счёт уже был отправлен, он находится выше в переписке.")
+
+    def precheckout(self, q):
+        with self.s.db:
+            old = self.s.one("SELECT * FROM checkouts WHERE id=?", (q["id"],))
+            if old:
+                approved, error = bool(old["approved"]), old["error"]
+            else:
+                oid = q.get("invoice_payload", "").removeprefix("order:")
+                o = self.s.order(oid)
+                error = "Счёт недействителен. Открой /orders или свяжись с поддержкой."
+                approved = False
+                valid = (self.cfg.payments_enabled and o and q.get("invoice_payload") == f"order:{oid}"
+                         and q["from"]["id"] == o["user_id"] and q.get("currency") == "XTR"
+                         and type(q.get("total_amount")) is int and q["total_amount"] == o["price"]
+                         and o["accepted_terms"] == self.terms_hash and o["expires"] >= self.now())
+                if valid and (o["status"] == "quoted" or
+                              (o["status"] == "checkout" and o["checkout_at"] < self.now() - 900)):
+                    approved, error = True, ""
+                    self.s.run("UPDATE orders SET status='checkout',checkout_id=?,checkout_at=? WHERE id=?",
+                               (q["id"], self.now(), oid))
+                self.s.run("INSERT INTO checkouts VALUES (?,?,?)", (q["id"], int(approved), error))
+        params = {"pre_checkout_query_id": q["id"], "ok": approved}
+        if not approved:
+            params["error_message"] = error
+        try:
+            self.api.call("answerPreCheckoutQuery", **params)
+        except ApiError as exc:
+            if exc.code != 400:
+                raise
+
+    def record_payment(self, uid, p):
+        charge = p["telegram_payment_charge_id"]
+        if self.s.one("SELECT 1 FROM payments WHERE charge=?", (charge,)):
+            return
+        payload = p.get("invoice_payload", "")
+        oid = payload.removeprefix("order:")
+        o = self.s.order(oid)
+        primary = bool(o and not self.s.one("SELECT 1 FROM payments WHERE order_id=? AND is_primary=1", (oid,)))
+        valid = (o and payload == f"order:{oid}" and uid == o["user_id"]
+                 and p.get("currency") == "XTR" and p.get("total_amount") == o["price"]
+                 and o["checkout_id"] and o["status"] in ("checkout", "quoted") and primary)
+        self.s.run("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?)",
+                   (charge, oid if o else None, uid, p["total_amount"], p["currency"], payload,
+                    "accepted" if valid else "review", int(bool(valid)), self.now()))
+        if not valid:
+            self.say(self.cfg.owner_id, "<b>Платёж требует проверки</b>\n"
+                     f"Заказ: {esc(oid[:60])}. Клиент: {uid}.\n"
+                     "Заказ не выдан. Для лишнего или несоответствующего платежа в Stars запущен возврат.",
+                     key=f"payment-review:{charge}")
+            if p["currency"] == "XTR":
+                self.schedule_refund(self.s.one("SELECT * FROM payments WHERE charge=?", (charge,)))
+            return
+        self.s.run("UPDATE orders SET status='paid' WHERE id=?", (oid,))
+        self.say(uid, f"<b>Оплата подтверждена: {p['total_amount']} ⭐</b>\nЗаказ {oid}.\n"
+                 "Подготовим выдачу в срок, указанный в предложении. Следить за заказом: /orders",
+                 key=f"paid-buyer:{charge}")
+        self.say(self.cfg.owner_id, f"<b>Оплачен заказ {oid}</b>\n{esc(o['title'])} · {p['total_amount']} ⭐\n"
+                 f"{esc(o['offer'])}\n\n/deliver {oid} код или инструкция",
+                 rows=[[button("Выдать заказ", f"op:deliver:{oid}")]], key=f"paid-owner:{charge}")
+
+    def schedule_refund(self, p):
+        self.s.run("UPDATE payments SET status='refund_pending' WHERE charge=? AND status!='refunded'", (p["charge"],))
+        if p["is_primary"]:
+            self.s.run("UPDATE orders SET status='refund_pending' WHERE id=? AND status!='refunded'", (p["order_id"],))
+        self.s.job(f"refund:{p['charge']}", "refundStarPayment", {
+            "user_id": p["user_id"], "telegram_payment_charge_id": p["charge"],
+        }, "refund", p["charge"])
+
+    def record_refund(self, uid, p):
+        charge = p["telegram_payment_charge_id"]
+        if not self.s.one("SELECT 1 FROM payments WHERE charge=?", (charge,)):
+            payload = p.get("invoice_payload", "")
+            oid = payload.removeprefix("order:")
+            o = self.s.order(oid)
+            primary = bool(o and uid == o["user_id"] and p["total_amount"] == o["price"]
+                           and payload == f"order:{oid}" and not self.s.one(
+                               "SELECT 1 FROM payments WHERE order_id=? AND is_primary=1", (oid,)))
+            self.s.run("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?,?)",
+                       (charge, oid if o else None, uid, p["total_amount"], p["currency"], payload,
+                        "refunded", int(primary), self.now()))
+        self.s.finish_refund(charge)
+
+    def queue(self, uid, page=0):
+        orders = self.s.all("SELECT * FROM orders WHERE status NOT IN ('delivered','refunded','rejected','cancelled') "
+                            "ORDER BY created,rowid LIMIT 10 OFFSET ?", (page * 10,))
+        rows = [[button(f"{o['id']} · {STATUS[o['status']]}", f"order:{o['id']}")] for o in orders]
+        nav = []
+        if page:
+            nav.append(button("Назад", f"queue:{page-1}"))
+        if len(orders) == 10:
+            nav.append(button("Дальше", f"queue:{page+1}"))
+        if nav:
+            rows.append(nav)
+        self.screen(uid, "<b>Открытые заказы</b>" if orders else "Открытых заказов на этой странице нет.", rows)
+
+    def admin_command(self, uid, command, args):
+        if command == "/admin":
+            self.operator_dashboard(uid)
+        elif command == "/queue":
+            self.queue(uid)
+        elif command == "/quote":
+            if not self.cfg.payments_enabled:
+                raise UserError("Оплата выключена. Настройте SELLER_DETAILS и PAYMENTS_ENABLED в .env и перезапустите бот.")
+            parts = args.split(maxsplit=2)
+            if len(parts) != 3 or (not parts[1].isascii() or not parts[1].isdigit()) or not 1 <= int(parts[1]) <= 100000:
+                raise UserError("Формат: /quote ID СУММА_В_STARS тариф, срок, страна, способ и время выдачи")
+            oid, price, offer = parts
+            o = self.own_order(uid, oid)
+            if o["status"] != "requested":
+                raise UserError("Предложение уже создано. Его цена фиксирована; для изменения закройте заявку и создайте новую.")
+            if not 20 <= len(offer) <= 500:
+                raise UserError("Описание: 20–500 символов. Укажите тариф, срок, страну, способ и время выдачи.")
+            self.s.run("UPDATE orders SET status='quoted',price=?,offer=?,expires=? WHERE id=?",
+                       (int(price), offer, self.now() + 86400, oid))
+            self.show_order(o["user_id"], oid)
+            self.say(uid, "Предложение отправлено. Оплата ещё не получена.")
+        elif command == "/deliver":
+            oid, sep, text = args.partition(" ")
+            o = self.own_order(uid, oid)
+            if o["status"] != "paid" or not sep or not 1 <= len(text) <= 1800:
+                raise UserError("Выдача доступна только после оплаты. Формат: /deliver ID код или инструкция (до 1800 символов).")
+            self.s.run("UPDATE orders SET status='delivery_queued',delivery=? WHERE id=?", (text, oid))
+            self.say(o["user_id"], f"<b>Заказ {oid} готов</b>\n{esc(o['title'])}\n\n{esc(text)}\n\n"
+                     "Если возникнет вопрос: /paysupport", key=f"delivery:{oid}", kind="delivery", ref=oid)
+            self.say(uid, "Выдача поставлена в очередь. Статус «Выдан» появится после подтверждения отправки.")
+        elif command == "/refund":
+            o = self.own_order(uid, args)
+            if o["status"] not in ("paid", "delivery_queued", "delivered", "refund_pending"):
+                raise UserError("В этом заказе нет оплаты, доступной для возврата.")
+            self.say(uid, f"Вернуть <b>{o['price']} ⭐</b> покупателю заказа {o['id']}?\n"
+                     "Это полный возврат платежа. Уже выданная подписка у внешнего сервиса автоматически не отменяется.",
+                     [[button("Подтвердить возврат", f"refund:{o['id']}")]])
+        elif command == "/reject":
+            oid, _, reason = args.partition(" ")
+            o = self.own_order(uid, oid)
+            if o["status"] not in ("requested", "quoted") or not 3 <= len(reason) <= 500:
+                raise UserError("Отказать можно до начала оплаты: /reject ID причина")
+            self.s.run("UPDATE orders SET status='rejected' WHERE id=?", (oid,))
+            self.say(o["user_id"], f"Заказ {oid}: предложение недоступно.\n{esc(reason)}")
+            self.say(uid, "Заявка закрыта.")
+        elif command == "/stats":
+            counts = self.s.all("SELECT status,count(*) AS n FROM orders GROUP BY status")
+            text = "\n".join(f"{STATUS[r['status']]}: {r['n']}" for r in counts) or "Заказов пока нет."
+            amount = self.s.one("SELECT coalesce(sum(amount),0) FROM payments WHERE is_primary=1 AND status='accepted'")[0]
+            self.say(uid, f"<b>Статистика</b>\n{text}\n\nПодтверждённые оплаты без возвратов: {amount} ⭐.\n"
+                     "Это сумма заказов, а не прибыль и не доступный баланс.")
+        elif command == "/failures":
+            jobs = self.s.all("SELECT id,kind,ref,last_error,state FROM outbox WHERE state='failed' "
+                              "OR (state='pending' AND attempts>3) ORDER BY id DESC LIMIT 10")
+            text = "\n".join(f"№{j['id']} · {j['kind']} · {j['state']}\n{esc(j['last_error'] or '')}" for j in jobs)
+            self.say(uid, text or "Нет операций с повторными ошибками.")
+        elif command == "/retry":
+            if not args.isdigit():
+                raise UserError("Формат: /retry НОМЕР_ИЗ_FAILURES")
+            changed = self.s.run("UPDATE outbox SET state='pending',next_try=0 WHERE id=? AND state='failed'", (int(args),)).rowcount
+            self.say(uid, "Операция возвращена в очередь." if changed else "Операция не найдена или уже в обработке.")
