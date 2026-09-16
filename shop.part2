@@ -1,0 +1,180 @@
+        if data == "faq":
+            self.screen(uid, "<b>Частые вопросы</b>\n\n"
+                        "<b>Когда будет цена?</b>\nПосле проверки тарифа и страны — до оплаты.\n\n"
+                        "<b>Нужен пароль?</b>\nНет. Пароли, коды входа и данные карты не присылай.\n\n"
+                        "<b>Есть автосписания?</b>\nНет. Каждый заказ оплачивается отдельно.\n\n"
+                        "<b>Когда подключат?</b>\nТочный срок указан в предложении. Статус есть в заказах.\n\n"
+                        "<b>Если не получилось?</b>\nОткрой заказ и нажми «Помощь с заказом».",
+                        [[button("Выбрать подписку", "catalog")], [button("Условия", "terms"), button("Поддержка", "support")]])
+        elif data == "terms":
+            self.screen(uid, self.terms_text(), [[button("Назад", "faq")]])
+        elif data.startswith("review:"):
+            oid = data.split(":", 1)[1]
+            o = self.own_order(uid, oid)
+            if uid != o["user_id"] or o["status"] != "quoted" or o["expires"] < self.now():
+                raise UserError("Это предложение уже закрыто. Открой заказы.")
+            self.screen(uid, f"<b>Перед оплатой · {esc(o['title'])}</b>\nИтого: {o['price']} ⭐\n\n"
+                        f"{esc(o['offer'])}\n\n" + self.terms_text(),
+                        [[button(f"Принимаю условия · Оплатить {o['price']} ⭐", f"accept:{oid}")],
+                         [button("← Вернуться к заказу", f"order:{oid}")]])
+        elif data.startswith("orders_page:"):
+            try:
+                page = int(data.split(":", 1)[1])
+                if not 0 <= page <= 100000: raise ValueError()
+            except ValueError:
+                raise UserError("Открой список заказов заново.")
+            self.list_orders(uid, page)
+        elif data == "home":
+            self.menu(uid)
+        elif data == "catalog":
+            self.categories(uid)
+        elif data.startswith("cat:"):
+            categories = list(dict.fromkeys(p["category"] for p in self.catalog.values()))
+            try:
+                index = int(data[4:])
+                if index < 0:
+                    raise ValueError()
+                category = categories[index]
+            except (ValueError, IndexError):
+                raise UserError("Открой каталог заново.")
+            rows = [[button(p["title"], f"product:{p['id']}")] for p in self.catalog.values()
+                    if p["category"] == category]
+            rows.append([button("Все категории", "catalog")])
+            self.screen(uid, f"<b>{esc(category)}</b>", rows)
+        elif data.startswith("product:"):
+            self.product(uid, data.split(":", 1)[1])
+        elif data.startswith("request:"):
+            pid = data.split(":", 1)[1]
+            self.clear_selection(uid)
+            if pid not in self.catalog:
+                raise UserError("Сервис не найден.")
+            self.s.run("INSERT INTO drafts VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE SET "
+                       "product_id=excluded.product_id,created=excluded.created", (uid, pid, self.now()))
+            self.say(uid, f"<b>{esc(self.catalog[pid]['title'])}</b>\n\n"
+                     "Напиши одним сообщением: нужный тариф, срок и страну аккаунта.\n"
+                     "Например: «Индивидуальный, 3 месяца, Казахстан».\n\n"
+                     "Пароли и коды входа не нужны. Отменить: /cancel")
+        elif data == "orders":
+            self.list_orders(uid)
+        elif data.startswith("order:"):
+            self.show_order(uid, data.split(":", 1)[1])
+        elif data.startswith("accept:"):
+            self.accept(uid, data.split(":", 1)[1])
+        elif data == "support":
+            self.support(uid)
+        elif data.startswith("refund:"):
+            self.admin(uid)
+            oid = data.split(":", 1)[1]
+            order = self.own_order(uid, oid)
+            if order["status"] == "refunded":
+                raise UserError("Возврат уже выполнен.")
+            if order["status"] == "delivery_sending":
+                raise UserError("Выдача сейчас отправляется. Повторите возврат после завершения отправки.")
+            p = self.s.one("SELECT * FROM payments WHERE order_id=? AND is_primary=1", (oid,))
+            if not p or p["status"] not in ("accepted", "refund_pending"):
+                raise UserError("Подтверждённой оплаты для возврата нет.")
+            self.schedule_refund(p)
+            self.say(uid, "Возврат поставлен в обработку. Подтверждение появится после ответа Telegram.")
+        elif data.startswith("queue:"):
+            self.admin(uid)
+            try:
+                page = max(0, int(data.split(":", 1)[1]))
+            except ValueError:
+                raise UserError("Некорректная страница.")
+            self.queue(uid, page)
+        else:
+            raise UserError("Открой меню: /start")
+
+    def support(self, uid):
+        self.reset_flows(uid)
+        self.screen(uid, "<b>Поддержка и вопросы об оплате</b>\n"
+                 f"Напиши @{esc(self.cfg.support)} и укажи номер заказа.\n"
+                 "Если оплата прошла, а выдача задерживается, сохрани квитанцию Telegram.",
+                 [[button("Задать вопрос в боте", "ticketnew:-")],
+                  [button("Мои обращения", "tickets")],
+                  [{"text": "Открыть личный чат", "url": f"https://t.me/{self.cfg.support}"}],
+                  [button("Главное меню", "home")]])
+
+    def message(self, uid, text):
+        if text.startswith("/"):
+            command, _, args = text.partition(" ")
+            command = command.split("@")[0].lower()
+            args = args.strip()
+            if command in ("/start", "/help"):
+                self.menu(uid)
+            elif command == "/search":
+                self.search(uid, args)
+            elif command == "/favorites":
+                self.favorites(uid)
+            elif command == "/catalog":
+                self.categories(uid)
+            elif command == "/orders":
+                self.list_orders(uid)
+            elif command == "/order":
+                self.show_order(uid, args)
+            elif command in ("/support", "/paysupport"):
+                self.support(uid)
+            elif command == "/terms":
+                self.say(uid, self.terms_text())
+            elif command == "/privacy":
+                self.say(uid, "Храним Telegram ID, избранные сервисы, незавершённый выбор, параметры и историю заказов, подтверждения оплаты "
+                         "и выданные инструкции, сообщения поддержки. Эти данные нужны для исполнения заказа и поддержки. "
+                         "Данные доступны администратору магазина. Пароли и банковские реквизиты "
+                         f"бот не запрашивает. Вопросы по данным: @{esc(self.cfg.support)}.")
+            elif command == "/cancel":
+                self.reset_flows(uid)
+                self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+                if args:
+                    order = self.own_order(uid, args)
+                    if order["status"] not in ("requested", "quoted"):
+                        raise UserError("Оплаченный заказ или начатую оплату отменяет поддержка: /paysupport")
+                    self.s.run("UPDATE orders SET status='cancelled' WHERE id=?", (args,))
+                self.say(uid, "Отменено. Открыть каталог: /catalog")
+            elif command in ("/admin", "/queue", "/quote", "/deliver", "/refund", "/reject",
+                             "/stats", "/failures", "/retry"):
+                self.admin(uid)
+                self.admin_command(uid, command, args)
+            else:
+                self.say(uid, "Открыть каталог: /catalog. Поддержка: /paysupport")
+            return
+        if self.operator_message(uid, text):
+            return
+        if self.storefront_message(uid, text):
+            return
+        draft = self.s.one("SELECT * FROM drafts WHERE user_id=?", (uid,))
+        if not draft:
+            self.search(uid, text)
+            return
+        if draft["created"] < self.now() - 3600 or draft["product_id"] not in self.catalog:
+            self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+            raise UserError("Выбери подписку заново: /catalog")
+        if not 4 <= len(text.strip()) <= 500:
+            raise UserError("Нужны тариф, срок и страна аккаунта: от 4 до 500 символов.")
+        active = self.s.all("SELECT * FROM orders WHERE user_id=? AND status IN "
+                            "('requested','quoted','checkout','paid','delivery_queued','delivery_sending','refund_pending')", (uid,))
+        if len(active) >= 3:
+            raise UserError("У тебя уже 3 открытых заказа. Проверь /orders или напиши в поддержку.")
+        for order in active:
+            if order["product_id"] == draft["product_id"]:
+                raise UserError(f"По этому сервису уже есть заказ {order['id']}. Проверь /orders.")
+        p = self.catalog[draft["product_id"]]
+        oid = uuid.uuid4().hex[:12]
+        self.s.run("INSERT INTO orders(id,user_id,product_id,title,details,created) VALUES (?,?,?,?,?,?)",
+                   (oid, uid, p["id"], p["title"], text.strip(), self.now()))
+        self.s.run("DELETE FROM drafts WHERE user_id=?", (uid,))
+        self.say(uid, f"<b>Заявка {oid} принята</b>\n{esc(p['title'])}\n"
+                 "Проверим наличие и пришлём предложение. Пока ничего оплачивать не нужно.",
+                 [[button("Посмотреть заказ", f"order:{oid}")]])
+        self.say(self.cfg.owner_id, f"<b>Новая заявка {oid}</b>\n{esc(p['title'])}\n"
+                 f"Клиент: <a href=\"tg://user?id={uid}\">{uid}</a>\n{esc(text.strip())}\n\n"
+                 f"/quote {oid} СУММА_В_STARS тариф, срок, страна, способ и время выдачи\n"
+                 f"/reject {oid} причина", [[button("Обработать заявку", f"order:{oid}")]])
+
+    def terms_text(self):
+        seller = esc(self.cfg.seller or self.cfg.title)
+        return f"<b>Условия заказа</b>\nПродавец: {seller}\n\n{esc(self.terms)}\n\nПоддержка: @{esc(self.cfg.support)}"
+
+    def list_orders(self, uid, page=0):
+        self.reset_flows(uid)
+        orders = self.s.all("SELECT * FROM orders WHERE user_id=? ORDER BY created DESC,rowid DESC LIMIT 9 OFFSET ?", (uid, page * 8))
+        if not orders:
