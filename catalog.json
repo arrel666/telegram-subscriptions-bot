@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "reviewed_at": "2026-09-12",
+  "note": "Стартовый ассортимент, а не рейтинг продаж. Все позиции принимают запросы; цены, региональная доступность и поставщики не заданы.",
+  "products": [
+    {"id":"chatgpt","category":"🧠 Нейросети","title":"ChatGPT","description":"Помощник для текстов, кода, анализа и повседневной работы. Запрос на индивидуальный платный тариф.","source_url":"https://chatgpt.com/pricing/","enabled":true},
+    {"id":"claude","category":"🧠 Нейросети","title":"Claude","description":"Помощник для работы с текстами, документами и программированием.","source_url":"https://claude.com/pricing","enabled":true},
+    {"id":"google_ai","category":"🧠 Нейросети","title":"Google AI / Gemini","description":"Платные возможности нейросетей Google. Конкретный план указывается в предложении.","source_url":"https://one.google.com/about/google-ai-plans/","enabled":true},
+    {"id":"perplexity","category":"🧠 Нейросети","title":"Perplexity","description":"Поиск ответов и исследование информации с помощью нейросетей.","source_url":"https://www.perplexity.ai/pro","enabled":true},
+    {"id":"midjourney","category":"🧠 Нейросети","title":"Midjourney","description":"Создание изображений по текстовому описанию.","source_url":"https://www.midjourney.com/plans","enabled":true},
+    {"id":"suno","category":"🧠 Нейросети","title":"Suno","description":"Инструменты для создания музыки. Возможности использования зависят от тарифа.","source_url":"https://suno.com/pricing","enabled":true},
+    {"id":"telegram_premium","category":"💬 Общение","title":"Telegram Premium","description":"Дополнительные возможности Telegram. Подарочная подписка: 3, 6 или 12 месяцев.","source_url":"https://telegram.org/faq_premium","enabled":true},
+    {"id":"discord_nitro","category":"💬 Общение","title":"Discord Nitro","description":"Платные возможности Discord для общения и персонализации.","source_url":"https://discord.com/nitro","enabled":true},
+    {"id":"youtube","category":"🎵 Музыка и видео","title":"YouTube Premium","description":"Платная подписка YouTube. Тариф и доступность зависят от страны аккаунта.","source_url":"https://www.youtube.com/premium","enabled":true},
+    {"id":"spotify","category":"🎵 Музыка и видео","title":"Spotify Premium","description":"Музыкальная подписка. Для подарочного кода необходимо подтвердить страну и совместимый тариф.","source_url":"https://support.spotify.com/article/gift-cards/","enabled":true},
+    {"id":"apple_music","category":"🎵 Музыка и видео","title":"Apple Music","description":"Музыкальная подписка Apple. Нужны страна аккаунта и желаемый срок.","source_url":"https://www.apple.com/apple-music/","enabled":true},
+    {"id":"netflix","category":"🎵 Музыка и видео","title":"Netflix","description":"Подписка на фильмы и сериалы. Доступность и план проверяются для страны аккаунта.","source_url":"https://help.netflix.com/en/node/24926","enabled":true},
+    {"id":"yandex_plus","category":"🎵 Музыка и видео","title":"Яндекс Плюс","description":"Мультиподписка Яндекса. Состав выбранного предложения уточняется до оплаты.","source_url":"https://plus.yandex.ru/","enabled":true},
+    {"id":"vk_music","category":"🎵 Музыка и видео","title":"VK Музыка","description":"Подписка музыкального сервиса VK.","source_url":"https://music.vk.com/","enabled":true},
+    {"id":"ivi","category":"🎵 Музыка и видео","title":"Иви","description":"Подписка онлайн-кинотеатра. Состав каталога зависит от предложения.","source_url":"https://www.ivi.ru/subscribe","enabled":true},
+    {"id":"okko","category":"🎵 Музыка и видео","title":"Okko","description":"Подписки онлайн-кинотеатра. Укажи интересующий пакет контента.","source_url":"https://okko.tv/","enabled":true},
+    {"id":"canva","category":"🎨 Дизайн и монтаж","title":"Canva Pro","description":"Инструменты дизайна, шаблоны и возможности для создания контента.","source_url":"https://www.canva.com/pricing/","enabled":true},
+    {"id":"capcut","category":"🎨 Дизайн и монтаж","title":"CapCut Pro","description":"Дополнительные инструменты для монтажа и обработки видео.","source_url":"https://www.capcut.com/resource/capcut-pro","enabled":true},
+    {"id":"adobe","category":"🎨 Дизайн и монтаж","title":"Adobe Creative Cloud","description":"Приложения Adobe для творчества. Укажи нужное приложение или набор.","source_url":"https://www.adobe.com/creativecloud/plans.html","enabled":true},
+    {"id":"playstation","category":"🎮 Игры","title":"PlayStation Plus","description":"Игровая подписка PlayStation. Уровень, срок и регион аккаунта согласуются заранее.","source_url":"https://www.playstation.com/ps-plus/","enabled":true},
+    {"id":"xbox","category":"🎮 Игры","title":"Xbox Game Pass","description":"Игровая подписка Xbox. Укажи устройство и интересующий план.","source_url":"https://www.xbox.com/xbox-game-pass","enabled":true},
+    {"id":"icloud","category":"☁️ Облако и работа","title":"iCloud+","description":"Дополнительное облачное хранилище и возможности Apple.","source_url":"https://www.apple.com/icloud/","enabled":true},
+    {"id":"google_one","category":"☁️ Облако и работа","title":"Google One","description":"Облачное хранилище Google. Укажи нужный объём и срок.","source_url":"https://one.google.com/about/plans","enabled":true},
+    {"id":"microsoft_365","category":"☁️ Облако и работа","title":"Microsoft 365","description":"Приложения Microsoft и облачные возможности. Укажи личный или рабочий сценарий.","source_url":"https://www.microsoft.com/microsoft-365","enabled":true}
+  ]
+}
